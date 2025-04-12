@@ -10,44 +10,110 @@ const slack = new WebClient(token);
 
 // Middleware để parse JSON
 app.use(express.json());
+
+// Biến cache để lưu thông tin users
+const userCache = new Map();
+
 // Route xử lý sự kiện từ Slack
 app.post('/slack/events', async (req, res) => {
   const { type, challenge, event } = req.body;
 
-  // Xác minh URL với Slack 66667777
+  // Xác minh URL với Slack
   if (type === 'url_verification') {
     return res.json({ challenge });
   }
 
-  // Xử lý sự kiện tin nhắn
-  if (type === 'event_callback' && event && event.type === 'message' && !event.subtype) {
+  // Xử lý các sự kiện từ Slack
+  if (type === 'event_callback' && event) {
     try {
-      // Lấy thông tin người dùng (tùy chọn)
-      const userInfo = await slack.users.info({ user: event.user });
-      const userName = userInfo.user?.name || 'Unknown';
+      // Sự kiện tin nhắn mới
+      if (event.type === 'message' && !event.subtype) {
+        // Lấy thông tin người dùng (tùy chọn)
+        const userInfo = await slack.users.info({ user: event.user });
+        const userName = userInfo.user?.name || 'Unknown';
 
-      // Lấy thông tin kênh (tùy chọn)
-      const channelInfo = await slack.conversations.info({ channel: event.channel });
-      const channelName = channelInfo.channel?.name || 'Unknown';
+        // Lấy thông tin kênh (tùy chọn)
+        const channelInfo = await slack.conversations.info({ channel: event.channel });
+        const channelName = channelInfo.channel?.name || 'Unknown';
 
-      // Log tin nhắn mới
-      console.log(`New message in #${channelName} from ${userName}: ${event.text}`);
+        // Log tin nhắn mới
+        console.log(`New message in #${channelName} from ${userName}: ${event.text}`);
 
-      // Xử lý tin nhắn (ví dụ: lưu vào DB, gửi thông báo, v.v.)
-      const messageData = {
-        channel: event.channel,
-        channelName,
-        user: event.user,
-        userName,
-        text: event.text,
-        timestamp: event.ts,
-      };
+        // Xử lý tin nhắn (ví dụ: lưu vào DB, gửi thông báo, v.v.)
+        const messageData = {
+          channel: event.channel,
+          channelName,
+          user: event.user,
+          userName,
+          text: event.text,
+          timestamp: event.ts,
+        };
 
-      // TODO: Thêm logic của bạn (lưu DB, gọi API khác, v.v.)
-      // Ví dụ: In ra để kiểm tra
-      console.log('Message data:', messageData);
+        // TODO: Thêm logic của bạn (lưu DB, gọi API khác, v.v.)
+        console.log('Message data:', messageData);
 
-      // Phản hồi 200 để xác nhận nhận sự kiện
+        return res.status(200).json({ success: true });
+      }
+
+      // Sự kiện user join channel
+      if (event.type === 'member_joined_channel') {
+        const { user: userId, channel: channelId } = event;
+        console.log(`User ${userId} joined channel ${channelId}`);
+
+        // Lấy thông tin user
+        const userResult = await slack.users.info({ user: userId });
+
+        if (userResult.ok) {
+          const user = userResult.user;
+          const userInfo = {
+            id: user.id,
+            name: user.name,
+            real_name: user.real_name,
+            display_name: user.profile.display_name || user.real_name,
+            email: user.profile.email || null,
+            avatar: user.profile.image_192 || null,
+            is_bot: user.is_bot,
+            is_admin: user.is_admin || false,
+            team_id: user.team_id,
+          };
+
+          // Cập nhật userCache
+          userCache.set(user.id, userInfo);
+          console.log(`Updated userCache with user ${userId}`);
+        } else {
+          console.error(`Error fetching info for user ${userId}:`, userResult.error);
+        }
+
+        return res.status(200).json({ success: true });
+      }
+
+      // Sự kiện user thay đổi profile
+      if (event.type === 'user_change') {
+        const user = event.user;
+        const userId = user.id;
+        console.log(`User ${userId} changed their profile`);
+
+        // Tạo userInfo từ dữ liệu sự kiện
+        const userInfo = {
+          id: user.id,
+          name: user.name,
+          real_name: user.real_name,
+          display_name: user.profile.display_name || user.real_name,
+          email: user.profile.email || null,
+          avatar: user.profile.image_192 || null,
+          is_bot: user.is_bot,
+          is_admin: user.is_admin || false,
+          team_id: user.team_id,
+        };
+
+        // Cập nhật userCache
+        userCache.set(user.id, userInfo);
+        console.log(`Updated userCache with new info for user ${userId}`);
+
+        return res.status(200).json({ success: true });
+      }
+
+      // Bỏ qua các sự kiện khác
       return res.status(200).json({ success: true });
     } catch (error) {
       console.error('Error processing event:', error);
@@ -55,10 +121,11 @@ app.post('/slack/events', async (req, res) => {
     }
   }
 
-  // Bỏ qua các sự kiện khác
+  // Bỏ qua các request không hợp lệ
   res.status(200).json({ success: true });
 });
 
+// Route để lấy danh sách user trong một kênh
 app.get('/users/:channelId', async (req, res) => {
   const { channelId } = req.params;
 
@@ -78,20 +145,25 @@ app.get('/users/:channelId', async (req, res) => {
             user: userId,
           });
           const user = userResult.user;
-          return {
+          const userInfo = {
             id: user.id,
-            name: user.name, // Tên người dùng (username)
-            real_name: user.real_name, // Tên thật
-            display_name: user.profile.display_name || user.real_name, // Tên hiển thị
-            email: user.profile.email || null, // Email (nếu có quyền users:read.email)
-            avatar: user.profile.image_192 || null, // URL ảnh đại diện
-            is_bot: user.is_bot, // Là bot hay không
-            is_admin: user.is_admin || false, // Là admin workspace không
-            team_id: user.team_id, // ID team/workspace
+            name: user.name,
+            real_name: user.real_name,
+            display_name: user.profile.display_name || user.real_name,
+            email: user.profile.email || null,
+            avatar: user.profile.image_192 || null,
+            is_bot: user.is_bot,
+            is_admin: user.is_admin || false,
+            team_id: user.team_id,
           };
+
+          // Lưu user vào cache
+          userCache.set(user.id, userInfo);
+
+          return userInfo;
         } catch (error) {
           console.error(`Error fetching info for user ${userId}:`, error);
-          return null; // Bỏ qua user nếu có lỗi
+          return null;
         }
       })
     );
@@ -118,30 +190,39 @@ app.get('/users/:channelId', async (req, res) => {
 // Route để crawl tin nhắn từ một kênh
 app.get('/crawl/:channelId', async (req, res) => {
   const { channelId } = req.params;
-  const {
-    limit, // Số lượng tin nhắn tối đa mỗi lần gọi
-    oldest, // Tin nhắn từ thời điểm này trở đi
-    latest, // Tin nhắn đến thời điểm này
-    inclusive, // Bao gồm tin nhắn tại oldest/latest
-    cursor // Phân trang
-  } = req.query; // Lấy từ query string
+  const { limit, oldest, latest, inclusive, cursor } = req.query;
 
   try {
     // Gọi API conversations.history với các filter
     const result = await slack.conversations.history({
       channel: channelId,
-      limit: parseInt(limit) || 100, // Mặc định 100 nếu không cung cấp
-      oldest: oldest || undefined, // Không đặt nếu không có
+      limit: parseInt(limit) || 100,
+      oldest: oldest || undefined,
       latest: latest || undefined,
-      inclusive: inclusive === 'true', // Chuyển string thành boolean
+      inclusive: inclusive === 'true',
       cursor: cursor || undefined,
     });
 
-    const messages = result.messages.map((msg) => ({
-      user: msg.user,
-      text: msg.text,
-      timestamp: msg.ts,
-    }));
+    // Map messages và thêm thông tin user từ cache
+    const messages = result.messages.map((msg) => {
+      const userInfo = userCache.get(msg.user) || {
+        id: msg.user,
+        name: 'Unknown',
+        real_name: 'Unknown',
+        display_name: 'Unknown',
+        email: null,
+        avatar: null,
+        is_bot: false,
+        is_admin: false,
+        team_id: null,
+      };
+
+      return {
+        user: userInfo,
+        text: msg.text,
+        timestamp: msg.ts,
+      };
+    });
 
     res.json({
       success: true,
@@ -164,7 +245,7 @@ app.get('/crawl/:channelId', async (req, res) => {
 app.get('/channels', async (req, res) => {
   try {
     const result = await slack.conversations.list({
-      types: 'public_channel,private_channel', // Lấy cả kênh công khai và riêng tư
+      types: 'public_channel,private_channel',
     });
 
     const channels = result.channels.map((channel) => ({
@@ -185,40 +266,40 @@ app.get('/channels', async (req, res) => {
   }
 });
 
+// Route để gửi tin nhắn
 app.post('/send/:channelId', async (req, res) => {
-    const { channelId } = req.params;
-    const { text } = req.body; // Tin nhắn được gửi qua body
+  const { channelId } = req.params;
+  const { text } = req.body;
 
-    // Kiểm tra xem text có được cung cấp không
-    if (!text) {
-      return res.status(400).json({
-        success: false,
-        error: 'Text is required in the request body',
-      });
-    }
+  if (!text) {
+    return res.status(400).json({
+      success: false,
+      error: 'Text is required in the request body',
+    });
+  }
 
-    try {
-      // Gọi API chat.postMessage để gửi tin nhắn
-      const result = await slack.chat.postMessage({
-        channel: channelId,
-        text: text,
-        as_user: true, // Gửi dưới danh nghĩa bot
-      });
+  try {
+    const result = await slack.chat.postMessage({
+      channel: channelId,
+      text: text,
+      as_user: true,
+    });
 
-      res.json({
-        success: true,
-        message: 'Message sent successfully',
-        channel: channelId,
-        timestamp: result.ts,
-      });
-    } catch (error) {
-      console.error('Error sending message:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message,
-      });
-    }
+    res.json({
+      success: true,
+      message: 'Message sent successfully',
+      channel: channelId,
+      timestamp: result.ts,
+    });
+  } catch (error) {
+    console.error('Error sending message:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
 });
+
 // Khởi động server
 app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
